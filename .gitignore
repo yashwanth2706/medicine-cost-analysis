@@ -13,14 +13,14 @@ dist/
 build/
 
 # Data files
-data/raw/*.xlsx
-data/raw/*.csv
-data/processed/*.xlsx
-data/processed/*.csv
-data/output/*.xlsx
-data/output/*.csv
-*.xls
-*.xlsm
+# data/raw/*.xlsx
+# data/raw/*.csv
+# data/processed/*.xlsx
+# data/processed/*.csv
+# data/output/*.xlsx
+# data/output/*.csv
+# *.xls
+# *.xlsm
 
 # IDE
 .vscode/
