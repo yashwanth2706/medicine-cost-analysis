@@ -33,32 +33,63 @@ HEADERS = {
 }
 
 
-# ─── Strategy 1: Parse HTML directly ────────────────────────────────────────
+# ─── Helper: recursively search a dict/list for a key ────────────────────────
+
+def find_key(d, key):
+    """Recursively search nested dicts/lists for a given key."""
+    if isinstance(d, dict):
+        if key in d:
+            return d[key]
+        for v in d.values():
+            result = find_key(v, key)
+            if result is not None:
+                return result
+    elif isinstance(d, list):
+        for item in d:
+            result = find_key(item, key)
+            if result is not None:
+                return result
+    return None
+
+
+# ─── Strategy 1: Parse HTML directly ─────────────────────────────────────────
 
 def extract_mrp_from_html(soup: BeautifulSoup) -> str | None:
-    """Try various CSS selectors & patterns used by 1mg."""
+    """Try various extraction strategies used by 1mg."""
 
-    # 1. Look for JSON-LD structured data (most reliable)
+    # 1. __NEXT_DATA__ — most reliable; contains raw product data before rendering
+    next_data_tag = soup.find("script", id="__NEXT_DATA__")
+    if next_data_tag:
+        try:
+            data = json.loads(next_data_tag.string)
+            page_props = data.get("props", {}).get("pageProps", {})
+            mrp = find_key(page_props, "mrp") or find_key(page_props, "MRP")
+            if mrp:
+                return str(mrp)
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    # 2. JSON-LD structured data
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string)
-            # Can be a list or a dict
             items = data if isinstance(data, list) else [data]
             for item in items:
                 if isinstance(item, dict):
                     offers = item.get("offers", {})
                     if isinstance(offers, dict):
-                        price = offers.get("price") or offers.get("highPrice")
+                        # Prefer highPrice (MRP) over price (discounted)
+                        price = offers.get("highPrice") or offers.get("price")
                         if price:
                             return str(price)
                     elif isinstance(offers, list) and offers:
-                        price = offers[0].get("price") or offers[0].get("highPrice")
+                        price = offers[0].get("highPrice") or offers[0].get("price")
                         if price:
                             return str(price)
         except (json.JSONDecodeError, AttributeError):
             continue
 
-    # 2. Common 1mg class names (may change over time)
+    # 3. Common 1mg CSS class names (may change over time)
     selectors = [
         {"class": re.compile(r"price-tag", re.I)},
         {"class": re.compile(r"DrugHeader__price", re.I)},
@@ -71,28 +102,30 @@ def extract_mrp_from_html(soup: BeautifulSoup) -> str | None:
         tag = soup.find(attrs=sel)
         if tag:
             text = tag.get_text(strip=True)
-            match = re.search(r"[\u20B9₹]?\s*(\d[\d,]*\.?\d*)", text)
+            match = re.search(r"[\u20B9₹]?\s*(\d[\d,]*(?:\.\d{1,2})?)(?!\d|%)", text)
             if match:
                 return match.group(1).replace(",", "")
 
-    # 3. Scan all text for "MRP" pattern
+    # 4. Scan all text for "MRP ₹xxx" pattern
     full_text = soup.get_text()
     match = re.search(
-        r"MRP\s*[:\-]?\s*[\u20B9₹]?\s*(\d[\d,]*\.?\d*)", full_text, re.I
+        r"MRP\s*[:\-]?\s*[\u20B9₹]?\s*(\d[\d,]*(?:\.\d{1,2})?)(?!\d|%)",
+        full_text,
+        re.I,
     )
     if match:
         return match.group(1).replace(",", "")
 
-    # 4. Generic ₹ price scan (first occurrence near "mrp" keyword)
-    prices = re.findall(r"[\u20B9₹]\s*(\d[\d,]*\.?\d*)", full_text)
+    # 5. Generic ₹ price scan — last resort
+    # Negative lookahead (?!\d|%) prevents "149.02" from bleeding into "149.029%"
+    prices = re.findall(r"[\u20B9₹]\s*(\d[\d,]*(?:\.\d{1,2})?)(?!\d|%)", full_text)
     if prices:
-        # Return the first price found (usually MRP is listed first on 1mg)
         return prices[0].replace(",", "")
 
     return None
 
 
-# ─── Strategy 2: Selenium fallback (for JS-rendered content) ─────────────────
+# ─── Strategy 2: Selenium fallback (for JS-rendered content) ──────────────────
 
 def extract_mrp_with_selenium(url: str) -> str | None:
     """Use headless Chrome via Selenium if requests doesn't work."""
@@ -123,7 +156,6 @@ def extract_mrp_with_selenium(url: str) -> str | None:
     )
     try:
         driver.get(url)
-        # Wait for price element (up to 10 seconds)
         try:
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.XPATH, "//*[contains(text(),'MRP')]"))
@@ -138,7 +170,7 @@ def extract_mrp_with_selenium(url: str) -> str | None:
         driver.quit()
 
 
-# ─── Main crawler ─────────────────────────────────────────────────────────────
+# ─── Main crawler ──────────────────────────────────────────────────────────────
 
 def get_mrp(url: str, use_selenium: bool = False) -> dict:
     """
@@ -149,7 +181,7 @@ def get_mrp(url: str, use_selenium: bool = False) -> dict:
         use_selenium: Force Selenium even if requests succeeds
 
     Returns:
-        dict with keys: url, medicine_name, mrp, currency, source
+        dict with keys: url, medicine_name, mrp, currency, source, error
     """
     if not url.startswith("http"):
         url = "https://" + url
@@ -168,14 +200,13 @@ def get_mrp(url: str, use_selenium: bool = False) -> dict:
         print(f"[*] Fetching: {url}")
         try:
             session = requests.Session()
-            # First hit the homepage to get cookies (mimics a real browser session)
+            # Hit homepage first to get cookies (mimics a real browser session)
             session.get("https://www.1mg.com", headers=HEADERS, timeout=10)
             resp = session.get(url, headers=HEADERS, timeout=15)
             resp.raise_for_status()
 
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Try to get medicine name from page title
             title_tag = soup.find("title")
             if title_tag:
                 result["medicine_name"] = title_tag.get_text(strip=True).split("|")[0].strip()
@@ -198,12 +229,14 @@ def get_mrp(url: str, use_selenium: bool = False) -> dict:
         result["source"] = "Selenium (headless Chrome)"
         result["error"] = None
     else:
-        result["error"] = result.get("error") or "MRP not found. Page structure may have changed."
+        result["error"] = (
+            result.get("error") or "MRP not found. Page structure may have changed."
+        )
 
     return result
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────────
+# ─── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
