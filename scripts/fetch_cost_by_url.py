@@ -65,8 +65,9 @@ def extract_mrp_from_html(soup: BeautifulSoup) -> str | None:
             page_props = data.get("props", {}).get("pageProps", {})
             mrp = find_key(page_props, "mrp") or find_key(page_props, "MRP")
             if mrp:
-                return str(mrp)
-        except (json.JSONDecodeError, AttributeError):
+                # Preserve decimals: format as float string, strip trailing zeros
+                return f"{float(mrp):.2f}".rstrip("0").rstrip(".")
+        except (json.JSONDecodeError, AttributeError, ValueError):
             pass
 
     # 2. JSON-LD structured data
@@ -248,7 +249,21 @@ def main():
         action="store_true",
         help="Use Selenium (headless Chrome) instead of requests",
     )
+    parser.add_argument(
+        "-mrp", "--mrp",
+        action="store_true",
+        help="Print only the MRP value and exit (no other output)",
+    )
     args = parser.parse_args()
+
+    # Suppress all prints when -mrp flag is used
+    if args.mrp:
+        import io, contextlib
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f):
+            result = get_mrp(args.url, use_selenium=args.selenium)
+        print(result["mrp"] if result["mrp"] else "Not found")
+        return 0 if result["mrp"] else 1
 
     result = get_mrp(args.url, use_selenium=args.selenium)
 
